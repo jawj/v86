@@ -63,6 +63,14 @@ def main():
     else:
         handle_dir(logger, from_path, to_path, args.zstd, zstd_module)
 
+def compress_stream(zstd_module, src, dst, level):
+    """Compress src stream into dst file object, compatible with both zstandard and compression.zstd."""
+    if hasattr(zstd_module.ZstdCompressor(level=level), 'copy_stream'):
+        zstd_module.ZstdCompressor(level=level).copy_stream(src, dst)
+    else:
+        with zstd_module.open(dst, 'wb', level=level) as writer:
+            shutil.copyfileobj(src, writer)
+
 def handle_dir(logger, from_path: str, to_path: str, use_compression: bool, zstd_module):
     def onerror(oserror):
         logger.warning(oserror)
@@ -92,7 +100,7 @@ def handle_dir(logger, from_path: str, to_path: str, use_compression: bool, zstd
                     logger.info("Compressing {} {}".format(absname, to_abs))
                     with open(absname, 'rb') as src_file:
                         with open(to_abs, 'wb') as dst_file:
-                            zstd_module.ZstdCompressor(level=19).copy_stream(src_file, dst_file)
+                            compress_stream(zstd_module, src_file, dst_file, level=19)
                 else:
                     logger.info("cp {} {}".format(absname, to_abs))
                     shutil.copyfile(absname, to_abs)
@@ -112,7 +120,7 @@ def handle_tar(logger, tar, to_path: str, use_compression: bool, zstd_module):
                     logger.info("Extracted and compressing {} ({})".format(to_abs, member.name))
                     f.seek(0)
                     with open(to_abs, 'wb') as dst_file:
-                        zstd_module.ZstdCompressor(level=19).copy_stream(f, dst_file)
+                        compress_stream(zstd_module, f, dst_file, level=19)
                 else:
                     logger.info("Extracted {} ({})".format(to_abs, member.name))
                     to_file = open(to_abs, "wb")

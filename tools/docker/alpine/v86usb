@@ -1,0 +1,29 @@
+#!/bin/sh
+LOG="/var/log/v86usb.log"
+
+# Log the incoming job
+echo "--- New print job ---" >> $LOG
+echo "Running as user: $(whoami)" >> $LOG
+echo "Arguments: $@" >> $LOG
+
+if [ $# -eq 0 ]; then
+  echo "direct v86usb \"Unknown\" \"v86 WebUSB Bridge\""
+  exit 0
+fi
+
+stty -F /dev/ttyS1 raw
+
+if [ -n "$6" ]; then
+  echo "Reading from file $6" >> $LOG
+  cat "$6" > /dev/ttyS1 2>> $LOG
+else
+  echo "Reading from stdin" >> $LOG
+  cat > /dev/ttyS1 2>> $LOG
+fi
+
+# Capture the true exit code of cat
+STATUS=$?
+echo "cat command exited with code: $STATUS" >> $LOG
+
+# Exit with the actual status so CUPS knows if it failed!
+exit $STATUS
