@@ -1,29 +1,45 @@
 #!/bin/sh
+# CUPS backend script: v86usb
+
+CHUNK_SIZE=1048576
+CHUNK_PATH="/root/chunk.bin"
 LOG="/var/log/v86usb.log"
 
-# Log the incoming job
-echo "--- New print job ---" >> $LOG
-echo "Running as user: $(whoami)" >> $LOG
-echo "Arguments: $@" >> $LOG
+echo "--- new print job ---" >> "$LOG"
+echo "running as user: $(id -un)" >> "$LOG"
+echo "args: $@" >> "$LOG"
 
+# no arguments -> CUPS is querying available backends
 if [ $# -eq 0 ]; then
   echo "direct v86usb \"Unknown\" \"v86 WebUSB Bridge\""
   exit 0
 fi
 
-stty -F /dev/ttyS1 raw
-
+# 6 arguments -> $6 is the file path (otherwise, read from stdin)
 if [ -n "$6" ]; then
-  echo "Reading from file $6" >> $LOG
-  cat "$6" > /dev/ttyS1 2>> $LOG
+  exec 3<"$6"
 else
-  echo "Reading from stdin" >> $LOG
-  cat > /dev/ttyS1 2>> $LOG
+  exec 3<&0
 fi
 
-# Capture the true exit code of cat
-STATUS=$?
-echo "cat command exited with code: $STATUS" >> $LOG
+# open the serial port once for both reading and writing
+exec 4<>/dev/ttyS1
 
-# Exit with the actual status so CUPS knows if it failed!
-exit $STATUS
+while true; do
+  # use iflag=fullblock if on GNU/Linux to prevent short reads on pipes
+  dd bs="$CHUNK_SIZE" count=1 iflag=fullblock of="$CHUNK_PATH" 2>/dev/null <&3
+  BYTES=$(wc -c < "$CHUNK_PATH" 2>/dev/null || echo 0)
+
+  if [ "$BYTES" -eq 0 ]; then break; fi
+  echo "wrote $BYTES bytes to $CHUNK_PATH" >> "$LOG"
+
+  sync "$CHUNK_PATH"
+  echo "chunk" >&4
+  read -r ACK <&4
+  
+  if [ "$BYTES" -lt "$CHUNK_SIZE" ]; then break; fi
+done
+
+echo "job finished" >> "$LOG"
+echo "print_done" >&4
+exit 0
