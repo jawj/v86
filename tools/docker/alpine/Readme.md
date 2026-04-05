@@ -1,3 +1,5 @@
+**The files in this directory of this fork are adapted to build Alpine Linux to support https://printervention.app.**
+
 You can build a Alpine Linux 9p image using Docker:
 
 1. As needed, kernel flavor (`virt` is smaller than `lts`) and set of additional packages (community repo is enabled by default) can be edited in `Dockerfile`
