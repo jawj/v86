@@ -1,4 +1,4 @@
-**The files in this directory of this fork are adapted to build Alpine Linux to support https://printervention.app.**
+**The files in this directory of this fork are adapted to build Alpine Linux to support https://yes-we-scan.app.**
 
 You can build a Alpine Linux 9p image using Docker:
 
