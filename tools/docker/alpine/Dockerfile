@@ -2,6 +2,7 @@ FROM docker.io/i386/alpine:3.22
 
 ENV KERNEL="lts"
 ENV ADDPKGS="usbip-utils cups cups-client gutenprint gutenprint-cups cups-filters ghostscript poppler-utils font-liberation dbus colord"
+# more drivers: "epson-inkjet-printer-escpr splix brlaser"
 # for SANE: "sane sane-backends sane-utils colord-sane"
 
 RUN apk add openrc alpine-base agetty alpine-conf linux-$KERNEL linux-firmware-none $ADDPKGS

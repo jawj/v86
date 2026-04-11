@@ -17,7 +17,11 @@ docker rm "$CONTAINER_NAME" || true
 docker create --platform linux/386 -t -i --name "$CONTAINER_NAME" "$IMAGE_NAME"
 
 echo "* dump driver names ..."
-docker run --rm  --platform linux/386 i386/alpine-v86 sh -c "cupsd && sleep 1 && lpinfo -m" > lpinfo-models.txt
+docker run --rm --platform linux/386 i386/alpine-v86 sh -c "cupsd && sleep 1 && lpinfo -m" \
+  | grep -v -E '(fr|pt)\.ppd' \
+  | grep -v '/simple ' \
+  | grep -v '^gutenprint/5\.3/C' \
+  > lpinfo-models.txt
 
 echo "* export files ..."
 docker export "$CONTAINER_NAME" | ./tarfilter.py > "$OUT_ROOTFS_TAR" # -o "$OUT_ROOTFS_TAR"
