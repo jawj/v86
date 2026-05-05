@@ -16,8 +16,11 @@ docker build . --platform linux/386 --rm --tag "$IMAGE_NAME"
 docker rm "$CONTAINER_NAME" || true
 docker create --platform linux/386 -t -i --name "$CONTAINER_NAME" "$IMAGE_NAME"
 
+echo "* export scan binary"
+docker cp $CONTAINER_NAME:/usr/local/bin/sane-scan ./sane-scan
+
 echo "* export files ..."
-docker export "$CONTAINER_NAME" | ./tarfilter.py > "$OUT_ROOTFS_TAR" # -o "$OUT_ROOTFS_TAR"
+docker export "$CONTAINER_NAME" | ./tarfilter.py > "$OUT_ROOTFS_TAR"
 
 echo "* JSONify ..."
 ../../../tools/fs2json.py --zstd --out "$OUT_FSJSON" "$OUT_ROOTFS_TAR"

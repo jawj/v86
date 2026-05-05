@@ -1,9 +1,17 @@
+FROM docker.io/i386/alpine:3.22 AS builder
+
+COPY sane-scan.c /tmp/sane-scan.c
+RUN apk add --no-cache build-base sane-dev && gcc -o /tmp/sane-scan /tmp/sane-scan.c -lsane -s -march=i686 -Os -flto
+
+
 FROM docker.io/i386/alpine:3.22
 
 ENV KERNEL="lts"
 ENV ADDPKGS="usbip-utils dbus colord sane sane-backends sane-utils colord-sane"
 
 RUN apk add openrc alpine-base agetty alpine-conf linux-$KERNEL linux-firmware-none $ADDPKGS
+
+COPY --from=builder /tmp/sane-scan /usr/local/bin/sane-scan
 
 # delete configs for non-USB devices, which take ages to time out 
 RUN rm /etc/sane.d/dll.d/dc25 \
