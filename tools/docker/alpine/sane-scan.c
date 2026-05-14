@@ -1,4 +1,7 @@
 /*
+ * Copyright 2026 George MacKerron
+ * Released under GPL v3: https://opensource.org/license/gpl-3.0
+ * 
  * sane-scan: long-lived SANE daemon
  *
  * Holds one SANE_Handle for the lifetime of the process. Reads commands
@@ -7,7 +10,13 @@
  * (newlines in string values are escaped to "\n"), so newline alone is a
  * sufficient response delimiter.
  *
- * Usage: sane-scan <device>
+ * Usage: sane-scan
+ *
+ * On startup, calls sane_init + sane_get_devices, opens the first device, and
+ * writes a one-line JSON banner to stdout describing it:
+ *   {"device":"...","vendor":"...","model":"...","type":"..."}
+ * On failure before the loop starts, writes "ERR ..." instead and exits.
+ * The banner doubles as the READY signal — JS reads it before sending commands.
  *
  * Commands (one per line):
  *   options                              Dump JSON array of all options.
@@ -44,6 +53,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 
 /* ── JSON output helpers ───────────────────────────────────────────── */
 
@@ -388,6 +399,36 @@ static SANE_Status set_geometry_value(SANE_Handle h, const char *name, double mm
   return sane_control_option(h, idx, SANE_ACTION_SET_VALUE, &w, &info);
 }
 
+/* Set "resolution" to the lowest value the backend reports as supported.
+   Used for previews: the user's chosen DPI is irrelevant for an on-screen
+   thumbnail, and at high DPI a preview can take many seconds. */
+static void minimize_resolution(SANE_Handle h) {
+  int n = get_option_count(h);
+  int idx = find_option(h, n, "resolution");
+  if (idx < 0) return;
+  const SANE_Option_Descriptor *d = sane_get_option_descriptor(h, idx);
+  if (!d || !SANE_OPTION_IS_ACTIVE(d->cap) || !SANE_OPTION_IS_SETTABLE(d->cap)) return;
+  if (d->type != SANE_TYPE_INT && d->type != SANE_TYPE_FIXED) return;
+
+  SANE_Word w;
+  if (d->constraint_type == SANE_CONSTRAINT_RANGE && d->constraint.range) {
+    w = d->constraint.range->min;
+  } else if (d->constraint_type == SANE_CONSTRAINT_WORD_LIST && d->constraint.word_list) {
+    int count = d->constraint.word_list[0];
+    if (count <= 0) return;
+    w = d->constraint.word_list[1];
+    for (int i = 2; i <= count; i++)
+      if (d->constraint.word_list[i] < w) w = d->constraint.word_list[i];
+  } else {
+    return;
+  }
+
+  SANE_Int info;
+  SANE_Status st = sane_control_option(h, idx, SANE_ACTION_SET_VALUE, &w, &info);
+  if (st != SANE_STATUS_GOOD)
+    fprintf(stderr, "sane-scan: failed to minimize resolution: %s\n", sane_strstatus(st));
+}
+
 /* SANE has no "reset geometry" call; the convention is to read each option's
    range constraint and write min (top-left) / max (bottom-right). */
 static void maximize_geometry(SANE_Handle h) {
@@ -417,6 +458,18 @@ static int do_scan(SANE_Handle h) {
   if (!out) {
     fprintf(stderr, "sane-scan: cannot open /dev/hvc0\n");
     return -1;
+  }
+
+  /* /dev/hvc0 is a TTY; default line discipline has OPOST|ONLCR, which expands
+     every 0x0A byte in the binary pixel stream to 0x0D 0x0A. At 16-bit depth the
+     low byte cycles through all 256 values, so 0x0A occurs ~1/256 bytes and the
+     row-shift garbles every scan. Switch to raw mode to pass bytes through. */
+  int hvc_fd = fileno(out);
+  struct termios t;
+  if (tcgetattr(hvc_fd, &t) == 0) {
+    cfmakeraw(&t);
+    if (tcsetattr(hvc_fd, TCSANOW, &t) != 0)
+      fprintf(stderr, "sane-scan: tcsetattr(/dev/hvc0) failed\n");
   }
 
   SANE_Status status = sane_start(h);
@@ -467,25 +520,50 @@ static int do_scan(SANE_Handle h) {
   }
   fflush(out);
 
-  uint8_t buf[64 * 1024];
+  /* Backends may pad rows: bytes_per_line ≥ pixels_per_line × channels × depth/8.
+     Read one row at a time and write only the meaningful prefix so the JS side's
+     row-stride assumption matches the bytes it sees. */
+  size_t out_row = (depth == 1)
+    ? ((size_t)width + 7) / 8
+    : (size_t)width * channels * (depth == 16 ? 2 : 1);
+  size_t stride = params.bytes_per_line > 0 && (size_t)params.bytes_per_line >= out_row
+    ? (size_t)params.bytes_per_line
+    : out_row;
+
+  uint8_t *row_buf = (uint8_t *)malloc(stride);
+  if (!row_buf) {
+    fprintf(stderr, "sane-scan: malloc(%zu) failed\n", stride);
+    sane_cancel(h);
+    fclose(out);
+    return -1;
+  }
+
+  size_t pos = 0;
   SANE_Int bytes_read;
   while (1) {
-    status = sane_read(h, buf, sizeof(buf), &bytes_read);
+    status = sane_read(h, row_buf + pos, (SANE_Int)(stride - pos), &bytes_read);
     if (status == SANE_STATUS_EOF) break;
     if (status != SANE_STATUS_GOOD) {
       fprintf(stderr, "sane-scan: sane_read: %s\n", sane_strstatus(status));
+      free(row_buf);
       sane_cancel(h);
       fclose(out);
       return -1;
     }
-    if (fwrite(buf, 1, bytes_read, out) != (size_t)bytes_read) {
-      fprintf(stderr, "sane-scan: write error\n");
-      sane_cancel(h);
-      fclose(out);
-      return -1;
+    pos += (size_t)bytes_read;
+    if (pos == stride) {
+      if (fwrite(row_buf, 1, out_row, out) != out_row) {
+        fprintf(stderr, "sane-scan: write error\n");
+        free(row_buf);
+        sane_cancel(h);
+        fclose(out);
+        return -1;
+      }
+      fflush(out);
+      pos = 0;
     }
-    fflush(out);
   }
+  free(row_buf);
 
   /* SANE spec: cancel at the end of every scan, including a clean EOF, or
      some backends keep the device in a "scanning" state. */
@@ -524,6 +602,7 @@ static int handle_preview(SANE_Handle h) {
   }
 
   maximize_geometry(h);
+  minimize_resolution(h);
   int ret = do_scan(h);
 
   /* always try to clear preview and restore the user's options, even if scan failed */
@@ -542,11 +621,7 @@ static void strip_eol(char *s) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    fprintf(stderr, "usage: sane-scan <device>\n");
-    return 1;
-  }
-  const char *device = argv[1];
+  (void)argc; (void)argv;
 
   /* line-buffered stdout: every '\n' auto-flushes, so a one-line response
      reaches the FIFO as soon as we finish writing it (no waiting on a
@@ -560,21 +635,50 @@ int main(int argc, char **argv) {
   SANE_Int version;
   if (sane_init(&version, NULL) != SANE_STATUS_GOOD) {
     fprintf(stderr, "sane-scan: sane_init failed\n");
+    fputs("ERR sane_init failed\n", stdout);
     return 1;
   }
-  fprintf(stderr, "sane-scan: sane_init OK, opening %s\n", device);
+  fprintf(stderr, "sane-scan: sane_init OK, getting devices\n");
+
+  /* local_only=TRUE: skip network backends; the scanner is local via USB/IP.
+     SANE owns the returned array; do NOT free it. */
+  const SANE_Device **devs = NULL;
+  SANE_Status status = sane_get_devices(&devs, SANE_TRUE);
+  if (status != SANE_STATUS_GOOD) {
+    fprintf(stderr, "sane-scan: sane_get_devices: %s\n", sane_strstatus(status));
+    fprintf(stdout, "ERR sane_get_devices: %s\n", sane_strstatus(status));
+    sane_exit();
+    return 1;
+  }
+  if (!devs || !devs[0]) {
+    fprintf(stderr, "sane-scan: no devices found\n");
+    fputs("ERR no devices found\n", stdout);
+    sane_exit();
+    return 1;
+  }
+  const SANE_Device *dev = devs[0];
+  fprintf(stderr, "sane-scan: opening %s\n", dev->name);
 
   SANE_Handle handle;
-  SANE_Status status = sane_open(device, &handle);
+  status = sane_open(dev->name, &handle);
   if (status != SANE_STATUS_GOOD) {
     fprintf(stderr, "sane-scan: sane_open: %s\n", sane_strstatus(status));
+    fprintf(stdout, "ERR sane_open: %s\n", sane_strstatus(status));
     sane_exit();
     return 1;
   }
   fprintf(stderr, "sane-scan: sane_open OK, awaiting commands\n");
 
-  /* No READY signal — JS sends 'options' as the first command and just
-     waits until our blocking sane_open finishes and we read it from stdin. */
+  /* Banner: one JSON object on its own line. Doubles as READY signal. */
+  fputs("{\"device\":", stdout);
+  json_string(stdout, dev->name);
+  fputs(",\"vendor\":", stdout);
+  json_string(stdout, dev->vendor ? dev->vendor : "");
+  fputs(",\"model\":", stdout);
+  json_string(stdout, dev->model ? dev->model : "");
+  fputs(",\"type\":", stdout);
+  json_string(stdout, dev->type ? dev->type : "");
+  fputs("}\n", stdout);
 
   char line[1024];
   int should_exit = 0;
